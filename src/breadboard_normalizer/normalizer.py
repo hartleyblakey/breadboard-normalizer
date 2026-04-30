@@ -151,7 +151,16 @@ class Normalizer:
             crop_square(image, [o[0], o[1]], self.corner_size),
     ])
 
-    def find_raw_corners(self, image):
+    def find_corners(self, image):
+        """
+        Finds the corners in an image. Returned values are in pixels, and the corners are in the following order,
+        with respect to the shape in the image and not the orientation of the breadboard
+
+        3------2\n
+        0------1
+
+        Returns None if the model failed to find all 4 corners
+        """
         source_corners = self._corner_rough_model(image)
 
         if len(source_corners) != 4:
@@ -159,47 +168,54 @@ class Normalizer:
         
         return reorder_corners(source_corners)
 
+    def warp_image(self, image, corners):
+        """
+        Warps the image so the provided corners are mapped to Normalizer.destination_corners. 
+        """
 
-    def normalize_image_raw(self, image):
-        source_corners = self._corner_rough_model(image)
-
-        if len(source_corners) != 4:
-            return None
-        
-        source_corners = reorder_corners(source_corners)
-
-        transform = cv2.getPerspectiveTransform(source_corners, self.destination_corners)
+        transform = cv2.getPerspectiveTransform(corners, self.destination_corners)
 
         return cv2.warpPerspective(image, transform, dsize=self.target_size)
     
     def normalize_image(self, image):
-        norm = self.normalize_image_raw(image)
+        """
+        Returns an (image, corners) pair where:
+        - image is the normalize image of size self.target_size, with the corners of the breadboard at
+          self.destination_corners
+        - the positive rail is on top
+        - corners is the pixel-space position of the corners in the original image
+          - so corners[0] and corners[1] are always the bottom of the breadboard, with the negative rail on the bottom
+        """
+        source_corners = self.find_corners(image)
+        if source_corners is None:
+            return (None, None)
+        
+        norm = self.warp_image(image, source_corners)
+
         label = self.breadboard_orientation_cv(norm)
+
         if label == 'flipped':
             norm = np.flipud(norm)
-        return norm
+            source_corners = np.flip(source_corners, axis=0)
+            
+        return norm, source_corners
 
     _image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
 
-
-
-    def _predict_corners_cv(self, norm_bgr):
-
-
-
-
-        pass
 
     def _show_ml_annotated_image(self, file, window_name):
         image = Image.open(file)
         image = np.asarray(image)
         print(image.shape)
 
-        normalized_image = self.normalize_image_raw(image)
+        source_corners = self.find_corners(image)
 
-        if normalized_image is None:
+        if source_corners is None:
             print(f"Failed to find corners at {file}")
             return
+
+        normalized_image = self.warp_image(image, source_corners)
+
 
         norm_bgr = np.flip(normalized_image, axis=-1)
 
@@ -304,7 +320,13 @@ class Normalizer:
         image = np.asarray(image)
         print(image.shape)
 
-        normalized_image = self.normalize_image_raw(image)
+        source_corners = self.find_corners(image)
+
+        if source_corners is None:
+            print(f"Failed to find corners at {file}")
+            return
+
+        normalized_image = self.warp_image(image, source_corners)
 
         if normalized_image is None:
             print(f"Failed to find corners at {file}")
@@ -398,7 +420,7 @@ class Normalizer:
 
         image_resized = resize_width(image, norm_bgr.shape[1])
         image_resized = np.flip(image_resized, axis=-1) # convert to BGR
-        corners = self.find_raw_corners(image_resized)
+        corners = self.find_corners(image_resized)
         if corners is not None:
             image_resized = draw_corners(image_resized, corners)
 
