@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name="breadboard_normalizer"
+version = "0.1.0"
+description = "Task 2: Normalize breadboard images"
+readme = "README.md"
+requires-python = ">=3.8"
+
+dependencies = [
+    "numpy",
+    "scikit-image",
+    "scikit-learn",
+    "matplotlib",
+    "tensorflow",
+    "pandas",
+    "seaborn",
+    "opencv-python",
+    "pillow",
+    "docaligner-docsaid"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
