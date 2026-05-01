@@ -315,70 +315,108 @@ class Normalizer:
         
         return label
 
-    def _show_annotated_image(self, file, window_name):
-        image = Image.open(file)
-        image = np.asarray(image)
-        print(image.shape)
+    def __filter_tails(v: np.ndarray, l: int = 15):
+        b = v[0]
+        t = v[-1]
+
+        m = np.mean(v)
+        for i in range(0, l):
+            if v[i] > 1.2 * b or v[i] < 0.8 * t:
+                break
+            v[i] = m
+        
+        for i in reversed(range(len(v) - l, len(v))):
+            if v[i] > 1.2 * t or v[i] < 0.8 * t:
+                break
+            v[i] = m
+            
+            
+        return v
+
+    def _show_annotated_image(self, image, window_name):
 
         source_corners = self.find_corners(image)
 
         if source_corners is None:
-            print(f"Failed to find corners at {file}")
-            return
+            return None
 
         normalized_image = self.warp_image(image, source_corners)
 
         if normalized_image is None:
-            print(f"Failed to find corners at {file}")
-            return
+            return None
 
         norm_bgr = np.flip(normalized_image, axis=-1)
 
-        avg = cv2.blur(norm_bgr, (64, 64))
+        avg = cv2.blur(norm_bgr, (128, 128))
 
     
 
         norm_float = norm_bgr.astype(np.float32)
         norm_float /= avg
-        norm_float *= 255
+        norm_float *= 255 / 2
 
         norm_float = np.clip(norm_float, 0, 255)
 
 
         length = np.linalg.norm(norm_float, axis=2, keepdims=True)
-        length = np.nan_to_num(length) + 0.001
+        length = np.nan_to_num(length) + 0.01
         normalized = norm_float / length
-        zeros = np.zeros_like(norm_float[:, :1, 0])
 
-        red = (np.dot(normalized, np.array([0, 0, 1])))
+
+        # hsv = cv2.cvtColor(norm_float, cv2.COLOR_BGR2HSV)
+        # mask = hsv[:, :, 1] <= 0.1
+        
+
+        red = normalized[:, :, 2]
+        # red[mask] = 0
         red -= np.mean(red)
         red = cv2.blur(red, (3, 3))
+        red_pre_median = np.clip(np.copy(red) * 255, 0, 255).astype(np.uint8)
         red = np.median(red, axis=1)[:, np.newaxis]
         red /= np.max(red)
         annotated_red = red * 255.0
         annotated_red = np.clip(annotated_red, 0, 255)
-        annotated_red = np.stack((zeros, zeros, annotated_red), axis=-1)
 
-        blue = (np.dot(normalized, np.array([1, 0, 0])))
+        blue = normalized[:, :, 0]
+        # blue[mask] = 0
         blue -= np.mean(blue)
         blue = cv2.blur(blue, (3, 3))
+        blue_pre_median = np.clip(np.copy(blue) * 255, 0, 255).astype(np.uint8)
         blue = np.median(blue, axis=1)[:, np.newaxis]
         blue /= np.max(blue)
         annotated_blue = blue * 255.0
         annotated_blue = np.clip(annotated_blue, 0, 255)
-        annotated_blue = np.stack((annotated_blue, zeros, zeros), axis=-1)
+        
 
+        # red = norm_float[:, :, 2] / total
+        # red[mask] = 0
+        # red -= np.mean(red)
+        # red = cv2.blur(red, (3, 3))
+        # red_pre_median = red
+        # red = np.median(red, axis=1)[:, np.newaxis]
+        # red /= np.max(red)
+        # annotated_red = red * 255.0
+        # annotated_red = np.clip(annotated_red, 0, 255)    
+
+        # blue = norm_float[:, :, 0] / total
+        # blue[mask] = 0
+        # blue -= np.mean(blue)
+        # blue = cv2.blur(blue, (3, 3))
+        # blue = np.median(blue, axis=1)[:, np.newaxis]
+        # blue /= np.max(blue)
+        # annotated_blue = blue * 255.0
+        # annotated_blue = np.clip(annotated_blue, 0, 255)
 
         red = red.flatten()
         blue =  blue.flatten()
 
         crop_size = int(len(red) * 0.33)
 
-        red_top = red[:crop_size]
-        red_bot = red[-crop_size:]
+        red_top = Normalizer.__filter_tails(red[:crop_size])
+        red_bot = Normalizer.__filter_tails(red[-crop_size:])
 
-        blue_top = blue[:crop_size]
-        blue_bot = blue[-crop_size:]
+        blue_top = Normalizer.__filter_tails(blue[:crop_size])
+        blue_bot = Normalizer.__filter_tails(blue[-crop_size:])
 
         red_top_peak = np.argmax(red_top)
         blue_top_peak = np.argmax(blue_top)
@@ -394,7 +432,7 @@ class Normalizer:
 
         label = "unknown"
 
-        if confidence >= 0.01:
+        if confidence >= 0.1:
             if vote == -1:
                 label = "flipped"
             elif vote == 1:
@@ -405,6 +443,12 @@ class Normalizer:
                 label = "np.sign was not -1, 0 or 1"
 
         norm_bgr_scaled = norm_float.astype(np.uint8)
+
+        norm_bgr_flipped = norm_bgr
+
+        if label == 'flipped':
+            norm_bgr_flipped = np.flipud(norm_bgr_flipped)
+
 
         annotated_red = annotated_red.astype(np.uint8)
 
@@ -418,24 +462,38 @@ class Normalizer:
 
         annotated_blue = cv2.resize(annotated_blue, [norm_bgr.shape[1], norm_bgr.shape[0]], interpolation=cv2.INTER_NEAREST)
 
-        image_resized = resize_width(image, norm_bgr.shape[1])
+        normalized[:, :, 1] = 0
+        normalized = np.flip(normalized, axis=-1)
+        normalized *= 16
+
+        pre_median_vis =  np.stack([blue_pre_median, np.zeros_like(annotated_blue), red_pre_median], axis=-1)
+        pre_median_vis = np.clip(pre_median_vis * 8, 0, 255)
+
+        annotated = np.vstack([norm_float.astype(np.uint8), pre_median_vis, np.stack((annotated_blue, np.zeros_like(annotated_blue), annotated_red), axis=-1)])
+
+
+
+
+        image_resized = resize_height(image, annotated.shape[0])
+
+        factor = image_resized.shape[0] / image.shape[0]
+
         image_resized = np.flip(image_resized, axis=-1) # convert to BGR
-        corners = self.find_corners(image_resized)
-        if corners is not None:
-            image_resized = draw_corners(image_resized, corners)
-
-        norm_bgr_flipped = norm_bgr
-
-        if label == 'flipped':
-            norm_bgr_flipped = np.flipud(norm_bgr_flipped)
+        if source_corners is not None:
+            image_resized = draw_corners(image_resized, source_corners * factor)
 
 
-        annotated = np.vstack([image_resized, norm_bgr, annotated_red + annotated_blue, norm_bgr_flipped])
 
-        annotated = cv2.putText(annotated, label, (16, 42), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 4)
-        annotated = cv2.putText(annotated, label, (18, 44), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 0), 2)
+
+        annotated = np.hstack([image_resized, annotated])
+
+        annotated = cv2.putText(annotated, label, (36, 122), cv2.FONT_HERSHEY_SIMPLEX, 5, (0, 0, 0), 16)
+        annotated = cv2.putText(annotated, label, (38, 124), cv2.FONT_HERSHEY_SIMPLEX, 5, (0, 255, 255), 8)
+
+        annotated = np.vstack([annotated, resize_width(norm_bgr_flipped, annotated.shape[1])])
 
         cv2.imshow(window_name, annotated)
+        return annotated
 
 
     def visualize_model(self, path):
@@ -457,11 +515,17 @@ class Normalizer:
         with os.scandir(path) as entries:
             for entry in entries:
                 if entry.is_file() and entry.name.lower().endswith(self._image_extensions):
-                    self._show_annotated_image(entry.path, window_name)
+                    image = Image.open(entry.path)
+                    image = np.asarray(image)
+                    if self._show_annotated_image(image, window_name) is None:
+                        print(f"Failed to find corners at {entry.path}")
+                        
                     if cv2.waitKey(0) & 0xFF == ord('q'):
                         break
         
         cv2.destroyAllWindows()
+
+
         
 
     
