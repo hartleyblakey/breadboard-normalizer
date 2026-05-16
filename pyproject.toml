@@ -7,7 +7,7 @@ name="breadboard_normalizer"
 version = "0.1.0"
 description = "Task 2: Normalize breadboard images"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 
 dependencies = [
     "numpy",
@@ -19,8 +19,13 @@ dependencies = [
     "seaborn",
     "opencv-python",
     "pillow",
-    "docaligner-docsaid"
+    "docaligner-docsaid",
+    "fastquadtree",
+    "pycpd",
 ]
+
+[project.optional-dependencies]
+open3d = ["open3d"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
