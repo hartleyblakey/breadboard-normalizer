@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import tensorflow as tf
-from numpy.typing import ArrayLike
 import numpy as np
 from docaligner import DocAligner
 import cv2
@@ -17,8 +16,10 @@ import numpy as np
 try:
     import open3d as o3d
     USE_OPEN3D = True
-except: 
+    print("Using Open3D for ICP")
+except ImportError: 
     USE_OPEN3D = False
+    print("Falling back to vendored ICP")
 
 
 import random
@@ -94,8 +95,8 @@ def aspect_metric(corners):
 
 def crop_square(image, l, size):
     h, w = image.shape[:2]
-    l[0] = min(l[0], w - size - 1)
-    l[1] = min(l[1], h - size - 1)
+    l[0] = min(l[0], w - size)
+    l[1] = min(l[1], h - size)
     return image[l[1]:l[1]+size, l[0]:l[0]+size]
 
 def resize_width(image: np.ndarray, target_width: int):
@@ -145,13 +146,18 @@ def normalize_points(points):
     return normalized, m
 
 
+
 class PinGrid:
     _size: np.ndarray
     _pad: np.ndarray
+    _grid_size: np.ndarray = np.array([65.1, 21.25])
 
     _base_points: np.ndarray
     points: np.ndarray
     labels = None
+
+    # grid spacing in pixels
+    pitch: np.ndarray
 
     _quadtree: QuadTree
 
@@ -168,6 +174,8 @@ class PinGrid:
         self.points = np.array(padded_base_points * self._size, dtype=np.float32)
         self._quadtree = QuadTree((low[0], low[1], high[0], high[1]), capacity=16)
         self._quadtree.insert_many_np(self.points)
+
+        self.pitch = self._size / self._grid_size
     
     
     def transform_points_3x3(points, matrix):
@@ -183,16 +191,43 @@ class PinGrid:
         return np.array(target_correspondences, dtype=np.float32)
 
 
+    def o3d_point_cloud_from_points(p):
+        p_3d = np.hstack((p, np.zeros((p.shape[0], 1))))
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(p_3d)
+        return pcd
+
+    def icp_open3d(self, source):
+        threshold=int(np.mean(self.pitch) * 4)
+
+        source_pc = PinGrid.o3d_point_cloud_from_points(source)
+        target_pc = PinGrid.o3d_point_cloud_from_points(self.points)
+
+        trans_init = np.eye(4)
+
+        # https://www.open3d.org/docs/latest/tutorial/pipelines/icp_registration.html
+        reg_p2p = o3d.pipelines.registration.registration_icp(
+            source_pc, target_pc, threshold, trans_init,
+            o3d.pipelines.registration.TransformationEstimationPointToPoint()
+            )
+        h = reg_p2p.transformation
+        source_pc.transform(h)
+        
+        transformed = np.asarray(source_pc.points)[:, :2]
+        # h = np.linalg.inv(h)
+        # drop the z axis
+        indices = [0, 1, 3]
+        h = h[np.ix_(indices, indices)]
+        return transformed, np.asarray(h)[:3, :3]
+
+
     def fit_icp(self, source: np.ndarray):
         if USE_OPEN3D:
-            pass
+            transformed, h = self.icp_open3d(source)
         else:
-            pass
-        h, distances, iterations = icp(source, self.points, max_iterations=50)
+            h, distances, iterations = icp(source, self.points, max_iterations=50)
         return h
     
-
-
     def rigid_cpd(source, target):
         # s_n, s_m = normalize_points(source)
         t_n, t_m = normalize_points(target)
@@ -277,6 +312,7 @@ class PinGrid:
         return (transformed, h)
 
     def affine_cpd_rev(source, target):
+
         # s_n, s_m = normalize_points(source)
         t_n, t_m = normalize_points(target)
         s_m = t_m
@@ -286,7 +322,7 @@ class PinGrid:
         _, ((affine, translation)) = reg.register()
         
         affine_3 = np.eye(3)
-        affine_3[:2, :2] = affine.T # apparently you need to transpose here for handedness or something, according to chatGPT
+        affine_3[:2, :2] = affine.T # apparently you need to transpose here to account for row vs column vector conventions, according to chatGPT
 
         h = np.eye(3)
         h[:2, 2] = translation
@@ -308,51 +344,36 @@ class PinGrid:
 
         return (transformed, h)
 
-    def fit_brute_force(self, source: np.ndarray):
+    def refine_x_ransac(self, source: np.ndarray):
         """
         Guess random initial transformations, use nearest neighbors to guess at correspondences,
-        and run it through cv2.findHomography() 30 times and keep the transform with the most inliners
+        and run it through cv2.findHomography() N times and keep the transform with the most inliners
 
         findHomography() is the only method here that handles perspective, but it needs 1-1 correspondences
-        between points in the source and target arrays. Nearest neighbors alone are a terrible way to do
-        this because of grid aliasing, and this method almost always fits one side well and lets the other 
-        side explode into perspective distortions.
+        between points in the source and target arrays. Nearest neighbors alone are not a great way to do
+        this because of grid aliasing, so if the source is not already mostly aligned this method tends to 
+        fits one side well and lets the other side explode into perspective distortions.
         """
         
-        spacing = np.mean(self._size / np.array([65.1, 21.25]))
         best_matches = 0
         best_transform = np.eye(3)
+        offsets = np.array([-2, -1, 0, 1, 2]) * np.mean(self.pitch)
+        for i in range(len(offsets)):
 
-        for i in range(30):
-            if i == 0:
-                guess_transform= np.eye(3)
-            else:
-                translation = np.array([
-                    random.randrange(-2, 3), random.randrange(-2, 3)
-                    ]) * spacing
-                translation = np.array([
-                    random.random(), random.random()
-                    ]) * spacing
-                rotation = (random.random() - 0.5) * 0.01
-                scale = np.array([random.random(), random.random()]) * 0.05 + 0.975
-
-                guess_transform = transform.AffineTransform(
-                    scale=scale,
-                    rotation=rotation,
-                    translation=translation
-                ).params
-            # pick 3 points and guess at correspondence
-
-
+            guess_transform = transform.AffineTransform(
+                scale=np.array([1, 1]),
+                rotation=0.0,
+                translation=np.array([offsets[i], 0])
+            ).params
 
             source_transformed = PinGrid.transform_points_3x3(source, guess_transform)
 
             target_correspondences = self.nearest_neighbors(source_transformed)
 
-            h, mask = cv2.findHomography(target_correspondences, source_transformed, method=cv2.RANSAC, ransacReprojThreshold=spacing/175.0, confidence=0.995)
+            # Most of these methods seem to give better results fitting the target to the source rather than vice versa
+            h, mask = cv2.findHomography(target_correspondences, source_transformed, method=cv2.RANSAC, ransacReprojThreshold=np.mean(self.pitch)/4.0)
             if h is None or mask is None:
                 continue
-
             h = np.linalg.inv(h)
 
             inliners = np.count_nonzero(mask)
@@ -360,37 +381,20 @@ class PinGrid:
                 best_matches = inliners
                 best_transform = h @ guess_transform
         return best_transform
-    
-    def fit_brute_force_icp(self, source: np.ndarray):
-        """
-        Try random *Horizontal* transformations, then apply ICP and keep the best. 
 
-        More reliable than fit_brute_force() since its more constrained and the error metric
-        is closer aligned to the problem. Intended to fix grid aliasing caused by other fitting
-        methods.
-        """
-        
-        spacing = np.mean(self._size / np.array([65.1, 21.25]))
-        best_score = 999.0
+    def refine_x_icp(self, source):
+        best_score = PinGrid.single_score(self.evaluate_fit(source))
         best_transform = np.eye(3)
+        best_refined = source
+        offsets = np.array([-2, -1, 0, 1, 2]) * np.mean(self.pitch)
+        for i in range(len(offsets)):
 
-        for i in range(30):
-            if i == 0:
-                guess_transform= np.eye(3)
-            else:
-                translation = np.array([
-                    random.randrange(-8, 12), 0
-                    ]) * spacing / 4.0
-                rotation = (random.random() - 0.5) * 0.01
-                rotation = 0.0
-                scale = np.array([random.random(), 1.0]) * 0.05 + 0.975
-
-                guess_transform = transform.AffineTransform(
-                    scale=scale,
-                    rotation=rotation,
-                    translation=translation
-                ).params
-            # pick 3 points and guess at correspondence
+            guess_transform = transform.AffineTransform(
+                scale=np.array([1, 1]),
+                rotation=0.0,
+                translation=np.array([offsets[i], 0])
+            ).params
+            
 
             source_transformed = PinGrid.transform_points_3x3(source, guess_transform)
 
@@ -398,12 +402,113 @@ class PinGrid:
 
             source_refined = PinGrid.transform_points_3x3(source_transformed, h)
 
-            rmse, duplicates, inliners = self.evaluate_fit(source_refined)
-            score = (rmse / (1.0 - duplicates))
+            score = PinGrid.single_score(self.evaluate_fit(source_refined))
             if score < best_score:
                 best_score = score
                 best_transform = h @ guess_transform
-        return best_transform
+                best_refined = source_refined
+        return best_refined, best_transform
+
+
+    def single_score(multi_score):
+        """
+        Combine inliner rmse, inliner ratio, and duplicate ratio arbitrarily into a single score.
+        Definitely not the correct way to do this
+        """
+        rmse, inliner_ratio, duplicate_ratio = multi_score
+        return (rmse / inliner_ratio ** 2)
+
+    def fit_cpd_ransac(self, source):
+        """
+        Attempt to combine the strengths of each method. ICP is stable but limited to rigid transforms, affine CPD is decent 
+        but needs a close starting alignment to not explode, cv2.findHomography with RANSAC is great if
+        the points are already well aligned across the board but seems very sensitive to poor initial alignment.
+
+        Run the best performing methods in decreasing order of stability and increasing order of quality, keeping
+        the best performing transform to avoid degenerate edge cases.
+        """
+        best_score = PinGrid.single_score(self.evaluate_fit(source))
+        best_h = np.eye(3)
+        best_t = source
+
+        h1 = self.fit_icp(source)
+        t1 = PinGrid.transform_points_3x3(source, h1)
+        c_score = PinGrid.single_score(self.evaluate_fit(t1))
+        if c_score < best_score:
+            print("icp did something, improved score by", best_score - c_score)
+            best_score = c_score
+            best_h = h1
+            best_t = t1
+
+        t2, h2 = PinGrid.affine_cpd_rev(best_t, self.points)
+        c_score = PinGrid.single_score(self.evaluate_fit(t2))
+        if c_score < best_score:
+            print("affine CPD did something, improved score by", best_score - c_score)
+            best_score = c_score
+            best_h = h2 @ best_h
+            best_t = t2
+
+        h3 = self.refine_x_ransac(best_t)
+        t3 = PinGrid.transform_points_3x3(best_t, h3)
+        c_score = PinGrid.single_score(self.evaluate_fit(t3))
+        if c_score < best_score:
+            print("ransac did something, improved score by", best_score - c_score)
+            best_score = c_score
+            best_h = h3 @ best_h
+            best_t = t3
+
+        t4, h4 = self.refine_x_icp(best_t)
+        c_score = PinGrid.single_score(self.evaluate_fit(t4))
+        if c_score < best_score:
+            print("refine off-by-one did something, improved score by", best_score - c_score)
+            best_score = c_score
+            best_h = h4 @ best_h
+            best_t = t4
+            
+        return best_t, best_h
+
+
+    def fit_icp_ransac(self, source):
+        """
+        Attempt to combine the strengths of each method. ICP is stable but limited to rigid transformations, cv2.findHomography with RANSAC 
+        can correct for perspective if the points are already well aligned across the board but seems very sensitive to poor initial alignment.
+
+        Run the best performing methods in decreasing order of stability and increasing order of quality, keeping
+        the best performing transform.
+        """
+        best_score = PinGrid.single_score(self.evaluate_fit(source))
+        best_h = np.eye(3)
+        best_t = source
+
+        h1 = self.fit_icp(source)
+        t1 = PinGrid.transform_points_3x3(source, h1)
+        c_score = PinGrid.single_score(self.evaluate_fit(t1))
+        if c_score < best_score:
+            print("icp did something, improved score by", best_score - c_score)
+            best_score = c_score
+            best_h = h1
+            best_t = t1
+
+        h2 = self.refine_x_ransac(best_t)
+        t2 = PinGrid.transform_points_3x3(best_t, h2)
+        c_score = PinGrid.single_score(self.evaluate_fit(t2))
+        if c_score < best_score:
+            print("ransac did something, improved score by", best_score - c_score)
+            best_score = c_score
+            best_h = h2 @ best_h
+            best_t = t2
+
+        # hack to try and prevent RANSAC from finding off-by-one solutions. Can probably be removed
+        t3, h3 = self.refine_x_icp(best_t)
+        c_score = PinGrid.single_score(self.evaluate_fit(t3))
+        if c_score < best_score:
+            print("refine off-by-one did something, improved score by", best_score - c_score)
+            best_score = c_score
+            best_h = h3 @ best_h
+            best_t = t3
+            
+        return best_t, best_h
+
 
     def eval_rmse(src, tgt):
         assert src.shape == tgt.shape
@@ -411,11 +516,14 @@ class PinGrid:
         return np.linalg.norm(src - tgt) / np.sqrt(len(src))
 
     def evaluate_fit(self, pts: np.ndarray):
+        """
+        Returns a tuple of (inliner RMSE, inliner ratio, duplicate ratio)
+        """
         neighbors = self.nearest_neighbors(pts)
 
         distances = np.linalg.norm(pts - neighbors, axis=1)
 
-        inliner_mask = distances < (self._size[0] / 65.0) * 0.25
+        inliner_mask = distances < np.mean(self.pitch) * 0.25
 
         inliners = pts[inliner_mask]
         inliner_neighbors = neighbors[inliner_mask]
@@ -423,9 +531,8 @@ class PinGrid:
         rmse = PinGrid.eval_rmse(inliners, inliner_neighbors)
 
         # rescale so its resolution agnostic and roughly in units of pin holes
-
         rmse_grid = rmse / self._size[0]
-        rmse_grid *= 65
+        rmse_grid *= np.mean(self.pitch)
 
         # more than one detected pinhole maps to a target pinhole
         # Attempt to catch off-by-one scale problems that might optimize RMSE on noisy inputs
@@ -458,10 +565,10 @@ class PinGrid:
             return f"Center grid at {x+1}{letters[len(letters)-y-1]}"
         if grid_name == 'rail_top':
             polarity = ['-', '+']
-            return f"Top rail at {x+1}{polarity[1-y]}"
+            return f"Top rail at {x+3+x//5}{polarity[1-y]}"
         if grid_name == 'rail_bot':
             polarity = ['-', '+']
-            return f"Bottom rail at {x+1}{polarity[y]}"
+            return f"Bottom rail at {x+3+x//5}{polarity[y]}"
         return "Unknown grid name"
 
     def grid_points(x, y):
@@ -473,47 +580,54 @@ class PinGrid:
         A rough manually tuned grid. 
         Made by visually aligning the points to a stacked image of the training data with pinhole detections highlighted.
 
-        Returns a points, labels pair, where each label is a (grid_name, x, y) pair.
+        Returns a (points, labels) pair, where each label is itself a (grid_name, x, y) pair.
 
-        There are 4 grids for the 4 connected grids on the breadboard (The center grid halves are not connected to each other)
+        There are 4 grids for the 4 connected grids on the breadboard (The center grid halves are not connected to each other):
+        - rail_top 50x2
+        - rail_bot 50x2
+        - base_top 63x5
+        - base_bot 63x5
+
+        This is a terrible function and in need of refactoring
         """
         labels = []
     
-        bb_size = np.array([65.1, 21.25])
+        bb_size = PinGrid._grid_size
         center_pos = np.array([1.525, 5.15])
         center_base = PinGrid.grid_points(np.arange(63), np.arange(5)).astype(float)
         center_labels = []
         for i, (x, y) in enumerate(center_base):
-            center_labels.append(('base_top', int(x), int(y)))
+            center_labels.append(('base_top', 63 - int(x) - 1, int(y)))
         center_base += center_pos
 
         rail_pos = np.array([3.525, 1.35])
         rail_x = np.zeros((50, 1))
         for i in range(59):
             rail_x[i - i//6] = i
+        
         rail_base = PinGrid.grid_points(rail_x, np.arange(2)) + rail_pos
         rail_labels = []
         for x, _ in enumerate(rail_x):
             for y in range(2):
-                rail_labels.append(('rail_top', x, y))
+                rail_labels.append(('rail_top', len(rail_x) - x - 1, y))
         
         pts = np.concatenate((rail_base, center_base), axis=0)
         labels = rail_labels + center_labels
 
-        pts_copy = np.copy(pts)
-        pts_copy[:, 1] = bb_size[1] - pts_copy[:, 1]
+        points_reflected = np.copy(pts)
+        points_reflected[:, 1] = bb_size[1] - points_reflected[:, 1]
 
-        labels_copy = labels.copy()
-        for i in range(len(labels_copy)):
-            name, x, y = labels_copy[i]
+        labels_reflected = labels.copy()
+        for i in range(len(labels_reflected)):
+            name, x, y = labels_reflected[i]
             if name == 'base_top':
-                labels_copy[i] = ('base_bot', x, y)
+                labels_reflected[i] = ('base_bot', x, y)
             if name == 'rail_top':
-                labels_copy[i] = ('rail_bot', x, y)
+                labels_reflected[i] = ('rail_bot', x, y)
 
-        pts = np.concatenate((pts, pts_copy), axis=0)
+        pts = np.concatenate((pts, points_reflected), axis=0)
 
-        labels = labels + labels_copy
+        labels = labels + labels_reflected
 
         return pts / bb_size, labels
 
@@ -534,8 +648,11 @@ class Normalizer:
     corner_flip_class_names = ['corner', 'invalid']
 
     # not sure how else to return so many values in an ergonomic way
-    # (inliner_rmse, inliner_ratio, duplicate_ratio)
-    last_score = None
+    last_score = None # (inliner_rmse, inliner_ratio, duplicate_ratio)
+    last_pinhole_detections = None
+    last_rough_corners = None
+    last_homography = None
+    last_grayscale = None
 
     pad: np.ndarray = np.array([0.00, 0.00])
 
@@ -553,7 +670,7 @@ class Normalizer:
     corner_fill: float = 1.0
 
 
-    RegistrationMethod = Optional[Literal["affine_cpd", "rigid_cpd", "icp"]]
+    RegistrationMethod = Optional[Literal["affine_cpd", "rigid_cpd", "icp", "icp_ransac", "cpd_ransac"]]
     
 
     def __init__(self, padding=None, output_resolution=None, raw_pingrid: PinGrid = None):
@@ -597,9 +714,9 @@ class Normalizer:
         """Returns an an array containing the 4 square corners of the image, cropped according to corner_size"""
         h, w = (image.shape[0], image.shape[1])
 
-        o = np.array([w, h]) * self.pad - self.corner_size * (1.0 - self.corner_fill)
+        o = np.array([w, h]) * self.model_pad - self.corner_size * (1.0 - self.corner_fill)
         o = np.array(o, dtype=int)
-        oi = np.array([w, h]) * (1.0 - self.pad) - self.corner_size * self.corner_fill
+        oi = np.array([w, h]) * (1.0 - self.model_pad) - self.corner_size * self.corner_fill
         oi = np.array(oi, dtype=int)
         return np.array([
             crop_square(image, [o[0], oi[1]], self.corner_size),
@@ -608,7 +725,7 @@ class Normalizer:
             crop_square(image, [o[0], o[1]], self.corner_size),
     ])
 
-    def find_corners(self, image):
+    def find_rough_corners(self, image):
         """
         Finds the corners in an image. Returned values are in pixels, and the corners are in the following order,
         with respect to the shape in the image and not the orientation of the breadboard
@@ -628,28 +745,41 @@ class Normalizer:
     def warp_image(self, image, corners):
         """
         Warps the image so the provided corners are mapped to Normalizer.destination_corners. 
+
+        Returns a (image, transform) pair
         """
 
         transform = cv2.getPerspectiveTransform(corners, self.destination_corners)
 
         return cv2.warpPerspective(image, transform, dsize=self.target_size), transform
 
-    def find_refinement_transform(self, norm_rough, registration: RegistrationMethod = 'affine_cpd'):
+    def find_refinement_transform(self, rough_norm, registration: RegistrationMethod = 'icp_ransac', debug=False):
         """
         Returns the refinement transform in output space
         """
-        keypoints = Normalizer.find_circles(norm_rough)
+        keypoints = Normalizer.find_circles(rough_norm, debug=debug)
 
         source = []
         for keypoint in keypoints:
             source.append(keypoint.pt)
         source = np.array(source)
 
-        if registration == "affine_cpd":
+        self.last_pinhole_detections = source
+        if registration is None:
+            transformed, h = source, np.eye(3)
+        elif registration == "affine_cpd":
             transformed, h = PinGrid.affine_cpd_rev(source, self.pingrid.points)
         elif registration == "rigid_cpd":
             transformed, h = PinGrid.rigid_cpd_rev(source, self.pingrid.points)
         elif registration == "icp":
+            h = self.pingrid.fit_icp(source)
+            transformed = PinGrid.transform_points_3x3(source, h)
+        elif registration == "icp_ransac":
+            transformed, h = self.pingrid.fit_icp_ransac(source)
+        elif registration == "cpd_ransac":
+            transformed, h = self.pingrid.fit_cpd_ransac(source)
+        else:
+            print(f"Warning: invalid registration method \"{registration}\", falling back to ICP")
             h = self.pingrid.fit_icp(source)
             transformed = PinGrid.transform_points_3x3(source, h)
 
@@ -657,23 +787,47 @@ class Normalizer:
 
         return h, (rmse, inliner_ratio, dup_ratio)
 
-    def normalize_image(self, image, registration: RegistrationMethod = 'affine_cpd'):
+
+    def find_normalization_transform(self, image, registration: RegistrationMethod = 'icp_ransac', debug=False):
         """
-        Returns an (image, corners) pair where:
+        Returns a (transform, score) tuple. If the process failed, returns (None, None)
+        """
+        rough_corners = self.find_rough_corners(image)
+        if rough_corners is None:
+            return (None, None)
+        
+        rough_transform = cv2.getPerspectiveTransform(rough_corners, self.destination_corners)
+        rough_norm = cv2.warpPerspective(image, rough_transform, dsize=self.target_size)
+
+        self.last_rough_corners = rough_corners
+
+        refinement_transform, score = self.find_refinement_transform(rough_norm, registration=registration, debug=debug)
+
+        return refinement_transform @ rough_transform, score
+
+
+    def normalize_image(self, image, registration: RegistrationMethod = 'icp_ransac', debug=False):
+        """
+        Returns an (image, corners, score) pair where:
         - image is the normalize image of size self.target_size, with the corners of the breadboard at
           self.destination_corners
         - the positive rail is on top
         - corners is the pixel-space position of the corners in the original image
           - so corners[0] and corners[1] are always the bottom of the breadboard, with the negative rail on the bottom
+        - score is a number representing the alignment quality between the detected pinholes and the target grid
+          - Currently only 1, 0.75, or 0
+            - 1 is good, 0.75 is close but imperfect, and 0 is a failed alignment
         """
 
-        source_corners = self.find_corners(image)
+        source_corners = self.find_rough_corners(image)
         if source_corners is None:
             return (None, None, None)
 
+        self.last_rough_corners = source_corners
+
         norm_rough, h = self.warp_image(image, source_corners)
 
-        output_refinement, h_score = self.find_refinement_transform(norm_rough, registration=registration)
+        output_refinement, h_score = self.find_refinement_transform(norm_rough, registration=registration, debug=debug)
 
         last_score_full = h_score
 
@@ -683,22 +837,20 @@ class Normalizer:
 
         score = 1.0
 
-        # score is an error metric
+        self.last_homography = refined_h
+
         if inliner_rmse > 0.1 or inliner_ratio < 0.85 or duplicate_ratio > 0.075:
-            # refined_h = h
             score = 0.75
-            print(f"Warning: refinement transform had an inliner rmse of {inliner_rmse}, inliner ratio of {inliner_ratio}, duplicate ratio of {duplicate_ratio}")
         if inliner_rmse > 0.15 or inliner_ratio < 0.8 or duplicate_ratio > 0.15:
             refined_h = h
             score = 0.0
-            print(f"Refinement transform failed.")
-            print(f"Warning: refinement transform had an inliner rmse of {inliner_rmse}, inliner ratio of {inliner_ratio}, duplicate ratio of {duplicate_ratio}")
-        
+        else:
+            self.last_pinhole_detections = PinGrid.transform_points_3x3(self.last_pinhole_detections, output_refinement)
+
         norm = cv2.warpPerspective(image, refined_h, dsize=self.target_size)
 
         # this is kind of sketchy
         source_corners = PinGrid.transform_points_3x3(self.destination_corners, np.linalg.inv(refined_h))
-
         
         label = self.breadboard_orientation_cv(norm)
 
@@ -711,16 +863,19 @@ class Normalizer:
     _image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
 
 
-    def _show_ml_annotated_image(self, image, window_name):
+    def _visualize_corner_classifier(self, image, window_name):
+        """
+        The corner classifier is not currently functional
+        """
 
-        source_corners = self.find_corners(image)
+        source_corners = self.find_rough_corners(image)
 
         image_bgr = np.flip(image, axis=-1)
 
         if source_corners is None:
             return image_bgr
 
-        normalized_image = self.warp_image(image, source_corners)
+        normalized_image, transform = self.warp_image(image, source_corners)
 
 
         norm_bgr = np.flip(normalized_image, axis=-1)
@@ -780,11 +935,9 @@ class Normalizer:
         cv2.putText(annotated, f"Validation Metric: {metric:.2f}", (16, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 2)
         # annotated = np.vstack([annotated, corner_stack])
 
-        cv2.imshow(window_name, annotated)
-
         return annotated
 
-    def find_circles(image, show_images=  False):
+    def find_circles(image, debug=  False):
         # tuned for np.array([1024, 340])
         base_size = np.array([1024, 340])
 
@@ -804,14 +957,14 @@ class Normalizer:
         params.minArea = 10
         
         params.filterByCircularity = True
-        params.minCircularity = 0.8
-        params.maxCircularity = 0.95
+        params.minCircularity = 0.4
+        # params.maxCircularity = 0.95
         
         params.filterByConvexity = True
-        params.minConvexity = 0.95
+        params.minConvexity = 0.65
         
         params.filterByInertia = True
-        params.minInertiaRatio = 0.01
+        params.minInertiaRatio = 0.5
 
         # params.filterByColor = True
         # params.blobColor = 0
@@ -820,61 +973,38 @@ class Normalizer:
         detector = cv2.SimpleBlobDetector_create(params)
         
         image_float = np.copy(image_resized).astype(np.float32)
-        blur = cv2.blur(image_float, (64, 64))
+        blur = cv2.blur(image_float, (16, 16))
 
         image_float = image_float / blur
-        image = np.clip(image_float * 155, 0, 255).astype(np.uint8)
+        image = np.clip(image_float * 200 - 100, 0, 255).astype(np.uint8)
 
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # # blur image
-        # blur = cv2.GaussianBlur(gray, (5,5), 0)
+        # Use CLAHE for better local contrast at the cost of speed
+        # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        # gray = clahe.apply(gray)
 
-        # # do otsu threshold on gray image
-        # thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]
-        # thresh = cv2.adaptiveThreshold(blur,255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,15,5)
-        # thresh = cv2.GaussianBlur(thresh, (5,5), 0)
+        keypoints = detector.detect(gray)
 
-        # Create CLAHE object
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        if debug:
+            vis = np.stack((gray,) * 3, axis=-1)
+            for kp in keypoints:
+                
+                vis = cv2.circle(vis, (int(kp.pt[0]), int(kp.pt[1])), 2, (0, 255, 255), -1)
 
-        # Apply to image
-        clahe_img = clahe.apply(gray)
-
-        # edges = cv2.Canny(clahe_img, 50, 200, None, 3)
-        # edges = np.copy(clahe_img)
-        # thresh = edges > 50
-        # inv_thresh = edges<=50
-        # edges[inv_thresh] = 0
-        # edges[thresh] = 255
-
-        # skeleton = skimage.morphology.skeletonize(edges)
-
-        # edges[skeleton] = 255
-        # edges[~skeleton] = 0
-
-        # lines = cv2.HoughLinesP(edges, 3, np.pi / 80, 20, None, 50, 10)
-        
-        # line_img = np.zeros((image.shape[0] * 3, image.shape[1] * 3, 3))
-        # if lines is not None:
-        #     for i in range(0, len(lines)):
-        #         l = lines[i][0] * 3
-        #         cv2.line(line_img, (l[0], l[1]), (l[2], l[3]), (0,0,255), 1, cv2.LINE_AA)
-
-        if show_images:
-            cv2.imshow("Annotated image 2", clahe_img)
-            cv2.waitKey(0)
+            cv2.imshow("Pinhole Detections", vis)
             # cv2.imshow("Annotated image 2", edges)
             # cv2.waitKey(0)
             # cv2.imshow("Annotated image 2", line_img)
             # cv2.waitKey(0)
             # Detect blobs
-        keypoints = detector.detect(clahe_img)
 
         for kp in keypoints:
             kp.pt = (kp.pt[0] * scale, kp.pt[1] * scale)
             kp.size *= scale
+
+
 
         return keypoints
 
@@ -915,6 +1045,7 @@ class Normalizer:
         red = red.flatten()
         blue =  blue.flatten()
 
+        # ignore the center of the image
         crop_size = int(len(red) * 0.33)
 
         red_top = red[:crop_size]
@@ -929,6 +1060,7 @@ class Normalizer:
         red_bot_peak = np.argmax(red_bot)
         blue_bot_peak = np.argmax(blue_bot)
 
+        # weight candidate labels by relative redness/blueness of their detected rails
         top_vote = np.sign(blue_top_peak - red_top_peak) * red_top[red_top_peak] * blue_top[blue_top_peak]
         bot_vote = np.sign(blue_bot_peak - red_bot_peak) * red_bot[red_bot_peak] * blue_bot[blue_bot_peak]
 
@@ -942,14 +1074,16 @@ class Normalizer:
                 label = "flipped"
             elif vote == 1:
                 label = "correct"
-            elif vote == 0:
-                label = "disputed"
             else:
-                label = "np.sign was not -1, 0 or 1"
+                label = "disputed"
         
         return label
 
     def __filter_tails(v: np.ndarray, l: int = 15):
+        """
+        Try to correct for background leaking around the edges of the breadboard by
+        ignoring edges of the array until something changes
+        """
         b = v[0]
         t = v[-1]
 
@@ -967,17 +1101,16 @@ class Normalizer:
             
         return v
 
-    def _show_annotated_image(self, image, window_name):
+    def _visualize_orientation_detector(self, image, window_name):
 
-        source_corners = self.find_corners(image)
+        transform, score = self.find_normalization_transform(image)
 
-        if source_corners is None:
+        if transform is None:
             return None
 
-        normalized_image = self.warp_image(image, source_corners)
+        source_corners = PinGrid.transform_points_3x3(self.destination_corners, np.linalg.inv(transform))
 
-        if normalized_image is None:
-            return None
+        normalized_image, _ = self.warp_image(image, source_corners)
 
         norm_bgr = np.flip(normalized_image, axis=-1)
 
@@ -1020,26 +1153,6 @@ class Normalizer:
         blue /= np.max(blue)
         annotated_blue = blue * 255.0
         annotated_blue = np.clip(annotated_blue, 0, 255)
-        
-
-        # red = norm_float[:, :, 2] / total
-        # red[mask] = 0
-        # red -= np.mean(red)
-        # red = cv2.blur(red, (3, 3))
-        # red_pre_median = red
-        # red = np.median(red, axis=1)[:, np.newaxis]
-        # red /= np.max(red)
-        # annotated_red = red * 255.0
-        # annotated_red = np.clip(annotated_red, 0, 255)    
-
-        # blue = norm_float[:, :, 0] / total
-        # blue[mask] = 0
-        # blue -= np.mean(blue)
-        # blue = cv2.blur(blue, (3, 3))
-        # blue = np.median(blue, axis=1)[:, np.newaxis]
-        # blue /= np.max(blue)
-        # annotated_blue = blue * 255.0
-        # annotated_blue = np.clip(annotated_blue, 0, 255)
 
         red = red.flatten()
         blue =  blue.flatten()
@@ -1088,10 +1201,6 @@ class Normalizer:
 
         annotated_blue = annotated_blue.astype(np.uint8)
 
-        # print(annotated.shape)
-
-        # annotated = cv2.resize(norm_bgr, (8, 256), interpolation=cv2.INTER_AREA)
-
         annotated_red = cv2.resize(annotated_red, [norm_bgr.shape[1], norm_bgr.shape[0]], interpolation=cv2.INTER_NEAREST)
 
         annotated_blue = cv2.resize(annotated_blue, [norm_bgr.shape[1], norm_bgr.shape[0]], interpolation=cv2.INTER_NEAREST)
@@ -1105,9 +1214,6 @@ class Normalizer:
 
         annotated = np.vstack([norm_float.astype(np.uint8), pre_median_vis, np.stack((annotated_blue, np.zeros_like(annotated_blue), annotated_red), axis=-1)])
 
-
-
-
         image_resized = resize_height(image, annotated.shape[0])
 
         factor = image_resized.shape[0] / image.shape[0]
@@ -1116,9 +1222,6 @@ class Normalizer:
         if source_corners is not None:
             image_resized = draw_corners(image_resized, source_corners * factor)
 
-
-
-
         annotated = np.hstack([image_resized, annotated])
 
         annotated = cv2.putText(annotated, label, (36, 122), cv2.FONT_HERSHEY_SIMPLEX, 5, (0, 0, 0), 16)
@@ -1126,11 +1229,10 @@ class Normalizer:
 
         annotated = np.vstack([annotated, resize_width(norm_bgr_flipped, annotated.shape[1])])
 
-        cv2.imshow(window_name, annotated)
         return annotated
 
 
-    def visualize_model(self, path):
+    def visualize_orientation(self, path):
 
         window_name = "Annotated image"
 
@@ -1141,7 +1243,8 @@ class Normalizer:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
         if os.path.isfile(path):
-            self._show_annotated_image(path, window_name)
+            annotated = self._visualize_orientation_detector(path, window_name)
+            cv2.imshow(window_name, annotated)
             cv2.waitKey(0)
             cv2.destroyAllWindows()
             return
@@ -1151,9 +1254,13 @@ class Normalizer:
                 if entry.is_file() and entry.name.lower().endswith(self._image_extensions):
                     image = Image.open(entry.path)
                     image = np.asarray(image)
-                    if self._show_ml_annotated_image(image, window_name) is None:
+                    annotated = self._visualize_corner_classifier(image, window_name)
+                    
+                    if annotated is None:
                         print(f"Failed to find corners at {entry.path}")
-                        
+                        continue
+                    
+                    cv2.imshow(window_name, annotated)
                     if cv2.waitKey(0) & 0xFF == ord('q'):
                         break
         
