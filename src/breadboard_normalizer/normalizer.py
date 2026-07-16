@@ -416,7 +416,7 @@ class PinGrid:
         Definitely not the correct way to do this
         """
         rmse, inliner_ratio, duplicate_ratio = multi_score
-        return (rmse / inliner_ratio ** 2)
+        return (rmse / np.maximum(inliner_ratio ** 2, 0.001))
 
     def fit_cpd_ransac(self, source):
         """
