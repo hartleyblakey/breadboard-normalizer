@@ -707,7 +707,11 @@ class Normalizer:
         self.destination_corners = reorder_corners(self.destination_corners)
         src_dir = Path(__file__).parent.parent
         model_path = src_dir / "weights" / "corner_orientation.keras"
-        self._corner_flip_model = tf.keras.models.load_model(model_path)
+        try:
+            self._corner_flip_model = tf.keras.models.load_model(model_path)
+        except:
+            print(f"Warning: unable to find corner flip model in {model_path}")
+            pass
         return
     
     def crop_corners(self, image):
@@ -763,6 +767,9 @@ class Normalizer:
         for keypoint in keypoints:
             source.append(keypoint.pt)
         source = np.array(source)
+
+        if len(source) == 0:
+            return np.eye(3), None
 
         self.last_pinhole_detections = source
         if registration is None:
@@ -831,21 +838,22 @@ class Normalizer:
 
         last_score_full = h_score
 
-        inliner_rmse, inliner_ratio, duplicate_ratio = h_score
+        if h_score is not None:
+            inliner_rmse, inliner_ratio, duplicate_ratio = h_score
+            score = 1.0
+            if inliner_rmse > 0.1 or inliner_ratio < 0.85 or duplicate_ratio > 0.075:
+                score = 0.75
+            if inliner_rmse > 0.15 or inliner_ratio < 0.8 or duplicate_ratio > 0.15:
+                refined_h = h
+                score = 0.0
+            else:
+                self.last_pinhole_detections = PinGrid.transform_points_3x3(self.last_pinhole_detections, output_refinement)
+        else:
+            score = 0.0
 
         refined_h = output_refinement @ h
 
-        score = 1.0
-
         self.last_homography = refined_h
-
-        if inliner_rmse > 0.1 or inliner_ratio < 0.85 or duplicate_ratio > 0.075:
-            score = 0.75
-        if inliner_rmse > 0.15 or inliner_ratio < 0.8 or duplicate_ratio > 0.15:
-            refined_h = h
-            score = 0.0
-        else:
-            self.last_pinhole_detections = PinGrid.transform_points_3x3(self.last_pinhole_detections, output_refinement)
 
         norm = cv2.warpPerspective(image, refined_h, dsize=self.target_size)
 
@@ -867,6 +875,9 @@ class Normalizer:
         """
         The corner classifier is not currently functional
         """
+
+        if self._corner_flip_model is None:
+            return
 
         source_corners = self.find_rough_corners(image)
 
@@ -1079,7 +1090,7 @@ class Normalizer:
         
         return label
 
-    def __filter_tails(v: np.ndarray, l: int = 15):
+    def __filter_tails(v, l: int = 15):
         """
         Try to correct for background leaking around the edges of the breadboard by
         ignoring edges of the array until something changes
@@ -1103,7 +1114,7 @@ class Normalizer:
 
     def _visualize_orientation_detector(self, image, window_name):
 
-        transform, score = self.find_normalization_transform(image)
+        transform, _ = self.find_normalization_transform(image)
 
         if transform is None:
             return None
