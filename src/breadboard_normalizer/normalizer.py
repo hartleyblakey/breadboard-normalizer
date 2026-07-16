@@ -435,7 +435,7 @@ class PinGrid:
         t1 = PinGrid.transform_points_3x3(source, h1)
         c_score = PinGrid.single_score(self.evaluate_fit(t1))
         if c_score < best_score:
-            print("icp did something, improved score by", best_score - c_score)
+            # print("icp did something, improved score by", best_score - c_score)
             best_score = c_score
             best_h = h1
             best_t = t1
@@ -443,7 +443,7 @@ class PinGrid:
         t2, h2 = PinGrid.affine_cpd_rev(best_t, self.points)
         c_score = PinGrid.single_score(self.evaluate_fit(t2))
         if c_score < best_score:
-            print("affine CPD did something, improved score by", best_score - c_score)
+            # print("affine CPD did something, improved score by", best_score - c_score)
             best_score = c_score
             best_h = h2 @ best_h
             best_t = t2
@@ -452,7 +452,7 @@ class PinGrid:
         t3 = PinGrid.transform_points_3x3(best_t, h3)
         c_score = PinGrid.single_score(self.evaluate_fit(t3))
         if c_score < best_score:
-            print("ransac did something, improved score by", best_score - c_score)
+            # print("ransac did something, improved score by", best_score - c_score)
             best_score = c_score
             best_h = h3 @ best_h
             best_t = t3
@@ -460,7 +460,7 @@ class PinGrid:
         t4, h4 = self.refine_x_icp(best_t)
         c_score = PinGrid.single_score(self.evaluate_fit(t4))
         if c_score < best_score:
-            print("refine off-by-one did something, improved score by", best_score - c_score)
+            # print("refine off-by-one did something, improved score by", best_score - c_score)
             best_score = c_score
             best_h = h4 @ best_h
             best_t = t4
@@ -484,7 +484,7 @@ class PinGrid:
         t1 = PinGrid.transform_points_3x3(source, h1)
         c_score = PinGrid.single_score(self.evaluate_fit(t1))
         if c_score < best_score:
-            print("icp did something, improved score by", best_score - c_score)
+            # print("icp did something, improved score by", best_score - c_score)
             best_score = c_score
             best_h = h1
             best_t = t1
@@ -493,7 +493,7 @@ class PinGrid:
         t2 = PinGrid.transform_points_3x3(best_t, h2)
         c_score = PinGrid.single_score(self.evaluate_fit(t2))
         if c_score < best_score:
-            print("ransac did something, improved score by", best_score - c_score)
+            # print("ransac did something, improved score by", best_score - c_score)
             best_score = c_score
             best_h = h2 @ best_h
             best_t = t2
@@ -502,7 +502,7 @@ class PinGrid:
         t3, h3 = self.refine_x_icp(best_t)
         c_score = PinGrid.single_score(self.evaluate_fit(t3))
         if c_score < best_score:
-            print("refine off-by-one did something, improved score by", best_score - c_score)
+            # print("refine off-by-one did something, improved score by", best_score - c_score)
             best_score = c_score
             best_h = h3 @ best_h
             best_t = t3
@@ -838,6 +838,8 @@ class Normalizer:
 
         last_score_full = h_score
 
+        refined_h = output_refinement @ h
+
         if h_score is not None:
             inliner_rmse, inliner_ratio, duplicate_ratio = h_score
             score = 1.0
@@ -850,8 +852,6 @@ class Normalizer:
                 self.last_pinhole_detections = PinGrid.transform_points_3x3(self.last_pinhole_detections, output_refinement)
         else:
             score = 0.0
-
-        refined_h = output_refinement @ h
 
         self.last_homography = refined_h
 
