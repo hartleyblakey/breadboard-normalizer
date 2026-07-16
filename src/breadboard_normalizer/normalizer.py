@@ -512,6 +512,10 @@ class PinGrid:
 
     def eval_rmse(src, tgt):
         assert src.shape == tgt.shape
+
+        if len(src) == 0:
+            return 0.0
+
         # no idea how or why this works https://stackoverflow.com/questions/21926020/how-to-calculate-rmse-using-ipython-numpy
         return np.linalg.norm(src - tgt) / np.sqrt(len(src))
 
