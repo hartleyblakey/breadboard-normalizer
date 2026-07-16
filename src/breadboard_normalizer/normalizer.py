@@ -370,6 +370,9 @@ class PinGrid:
 
             target_correspondences = self.nearest_neighbors(source_transformed)
 
+            if len(target_correspondences) < 4:
+                continue
+
             # Most of these methods seem to give better results fitting the target to the source rather than vice versa
             h, mask = cv2.findHomography(target_correspondences, source_transformed, method=cv2.RANSAC, ransacReprojThreshold=np.mean(self.pitch)/4.0)
             if h is None or mask is None:
