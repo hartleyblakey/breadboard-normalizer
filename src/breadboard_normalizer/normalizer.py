@@ -986,7 +986,7 @@ class Normalizer:
         image_float = np.copy(image_resized).astype(np.float32)
         blur = cv2.blur(image_float, (16, 16))
 
-        image_float = image_float / np.max(blur, 1.0 / 512.0)
+        image_float = image_float / np.maximum(blur, 1.0 / 512.0)
         image = np.clip(image_float * 200 - 100, 0, 255).astype(np.uint8)
 
 
