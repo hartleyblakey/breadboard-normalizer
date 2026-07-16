@@ -1025,7 +1025,7 @@ class Normalizer:
         avg = cv2.blur(norm_bgr, (64, 64))
 
         norm_float = norm_bgr.astype(np.float32)
-        norm_float /= avg
+        norm_float /= np.maximum(avg, 1.0 / 512.0)
         norm_float *= 255
 
         norm_float = np.clip(norm_float, 0, 255)
