@@ -865,6 +865,7 @@ class Normalizer:
         if label == 'flipped':
             norm = np.rot90(norm, k=2)
             source_corners = np.roll(source_corners, shift=2, axis=0)
+            self.last_pinhole_detections = np.roll(self.last_pinhole_detections, shift=2, axis=0)
 
         return norm, source_corners, score
 
