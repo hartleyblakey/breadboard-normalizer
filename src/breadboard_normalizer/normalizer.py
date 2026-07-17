@@ -389,7 +389,7 @@ class PinGrid:
         best_score = PinGrid.single_score(self.evaluate_fit(source))
         best_transform = np.eye(3)
         best_refined = source
-        offsets = np.array([-2, -1, 0, 1, 2]) * np.mean(self.pitch)
+        offsets = np.array([-4, -3, -2, -1, 0, 1, 2, 3, 4]) * np.mean(self.pitch)
         for i in range(len(offsets)):
 
             guess_transform = transform.AffineTransform(
