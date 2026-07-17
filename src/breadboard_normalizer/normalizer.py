@@ -410,6 +410,8 @@ class PinGrid:
                 best_score = score
                 best_transform = h @ guess_transform
                 best_refined = source_refined
+                if offsets[i] != 0:
+                    print("improved by shifting horizontally")
         return best_refined, best_transform
 
 
