@@ -179,9 +179,12 @@ class PinGrid:
     
     
     def transform_points_3x3(points, matrix):
+        if points.size == 0:
+            return points
+        original_shape = points.shape
         points_transformed = points.reshape(-1, 1, 2)
         points_transformed = cv2.perspectiveTransform(points_transformed, matrix)
-        return points_transformed.reshape(-1, 2)
+        return points_transformed.reshape(original_shape)
     
     def nearest_neighbors(self, points):
         target_correspondences = []
