@@ -860,8 +860,6 @@ class Normalizer:
             if inliner_rmse > 0.15 or inliner_ratio < 0.8 or duplicate_ratio > 0.15:
                 refined_h = h
                 score = 0.0
-            else:
-                self.last_pinhole_detections = PinGrid.transform_points_3x3(self.last_pinhole_detections, output_refinement)
         else:
             score = 0.0
 
@@ -869,16 +867,25 @@ class Normalizer:
 
         norm = cv2.warpPerspective(image, refined_h, dsize=self.target_size)
 
-        # this is kind of sketchy
-        source_corners = PinGrid.transform_points_3x3(self.destination_corners, np.linalg.inv(refined_h))
-        
         label = self.breadboard_orientation_cv(norm)
 
         if label == 'flipped':
             norm = np.rot90(norm, k=2)
-            source_corners = np.roll(source_corners, shift=2, axis=0)
-            self.last_pinhole_detections = np.roll(self.last_pinhole_detections, shift=2, axis=0)
+            c = self.target_size / 2 - 0.5
+            rot180 = cv2.getRotationMatrix2D(c, 180.0, 1.0)
+            rot180 = np.vstack([rot180, [0, 0, 1]])
+            refined_h = rot180 @ refined_h
+            output_refinement = rot180 @ output_refinement
+            self.last_homography=refined_h
 
+        # this is kind of sketchy
+        source_corners = PinGrid.transform_points_3x3(self.destination_corners, np.linalg.inv(refined_h))
+
+        if score > 0.0:
+            self.last_pinhole_detections = PinGrid.transform_points_3x3(self.last_pinhole_detections, output_refinement)
+        else:
+            self.last_pinhole_detections = np.empty((0, 2), dtype=np.float32)
+        
         return norm, source_corners, score
 
     _image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
