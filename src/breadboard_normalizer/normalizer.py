@@ -10,7 +10,6 @@ from fastquadtree import QuadTree
 from pycpd import RigidRegistration, AffineRegistration
 from typing import Literal, Optional
 
-
 import numpy as np
 
 try:
@@ -424,7 +423,7 @@ class PinGrid:
         Definitely not the correct way to do this
         """
         rmse, inliner_ratio, duplicate_ratio = multi_score
-        return (rmse / np.maximum(inliner_ratio ** 2, 0.001))
+        return (rmse / np.maximum(inliner_ratio ** 2, 0.0001))
 
     def fit_cpd_ransac(self, source):
         """
@@ -474,6 +473,7 @@ class PinGrid:
             best_t = t4
             
         return best_t, best_h
+
 
 
     def fit_icp_ransac(self, source):
@@ -542,6 +542,9 @@ class PinGrid:
 
         rmse = PinGrid.eval_rmse(inliners, inliner_neighbors)
 
+        if inliners.size == 0:
+            rmse = np.mean(self.pitch) * 0.25
+ 
         # rescale so its resolution agnostic and roughly in units of pin holes
         rmse_grid = rmse / self._size[0]
         rmse_grid *= np.mean(self.pitch)
@@ -773,7 +776,7 @@ class Normalizer:
         """
         Returns the refinement transform in output space
         """
-        keypoints = Normalizer.find_circles(rough_norm, debug=debug)
+        keypoints = Normalizer.find_circles(rough_norm, debug=False)
 
         source = []
         for keypoint in keypoints:
@@ -803,6 +806,22 @@ class Normalizer:
             transformed = PinGrid.transform_points_3x3(source, h)
 
         rmse, inliner_ratio, dup_ratio  = self.pingrid.evaluate_fit(transformed)
+
+        if np.array_equal(h, np.eye(3)):
+            print("No refinement transform found")
+
+        if debug:
+            vis = rough_norm.copy()
+            for kp in keypoints:
+                vis = cv2.circle(vis, (int(kp.pt[0]), int(kp.pt[1])), 2, (0, 0, 255), -1)
+
+            for kp in self.pingrid.points.astype(int):
+                vis = cv2.circle(vis, kp, 1, (255, 255, 255), -1)
+            
+            for kp in transformed.astype(int):
+                vis = cv2.circle(vis, kp, 1, (0, 255, 0), -1)
+
+            cv2.imshow("Pinhole Detections", vis)
 
         return h, (rmse, inliner_ratio, dup_ratio)
 
