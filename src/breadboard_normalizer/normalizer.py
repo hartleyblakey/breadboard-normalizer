@@ -1073,7 +1073,24 @@ class Normalizer:
 
         return keypoints
 
-    def breadboard_orientation_cv(self, image):
+    def breadboard_orientation_cv(self, image_padded):
+        # tuned for np.array([1024, 340]) with 0 padding
+        base_size = np.array([1024, 340])
+
+        h, w = image_padded.shape[:2]
+
+        ch = int(self.pad[1] * h)
+        cw = int(self.pad[0] * w)
+        image = image_padded[ch:h-ch, cw:w-cw, :]
+
+        h, w = image.shape[:2]
+
+        image_size = np.array([w, h])
+
+        scale = w / base_size[0]
+        image = resize_width(image, base_size[0])
+
+
         norm_bgr = np.flip(image, axis=-1)
 
         avg = cv2.blur(norm_bgr, (64, 64))
