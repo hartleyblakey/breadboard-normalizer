@@ -167,11 +167,12 @@ class PinGrid:
         
         print("Creating pingrid with", len(self._base_points), "points and", len(self.labels), "labels")
         
-        low = self._pad * self._size
-        high = self._size + low
-        padded_base_points = self._base_points / (1.0 + padding * 2) + padding
+        low = np.array([0, 0], dtype=np.float64)
+        high = self._size * 1.01
+
+        padded_base_points = self._base_points * (1.0 - padding * 2) + padding
         self.points = np.array(padded_base_points * self._size, dtype=np.float32)
-        self._quadtree = QuadTree((low[0], low[1], high[0], high[1]), capacity=16)
+        self._quadtree = QuadTree((low[0], low[1], high[0] + 1, high[1] + 1), capacity=16)
         self._quadtree.insert_many_np(self.points)
 
         self.pitch = self._size / self._grid_size
@@ -776,7 +777,7 @@ class Normalizer:
         """
         Returns the refinement transform in output space
         """
-        keypoints = Normalizer.find_circles(rough_norm, debug=False)
+        keypoints = self.find_circles(rough_norm, debug=False)
 
         source = []
         for keypoint in keypoints:
@@ -902,8 +903,8 @@ class Normalizer:
 
         if score > 0.0:
             self.last_pinhole_detections = PinGrid.transform_points_3x3(self.last_pinhole_detections, output_refinement)
-        else:
-            self.last_pinhole_detections = np.empty((0, 2), dtype=np.float32)
+       #else:
+        #    self.last_pinhole_detections = np.empty((0, 2), dtype=np.float32)
         
         return norm, source_corners, score
 
@@ -987,11 +988,20 @@ class Normalizer:
 
         return annotated
 
-    def find_circles(image, debug=  False):
-        # tuned for np.array([1024, 340])
+    def find_circles(self, image_padded, debug=  False):
+        # tuned for np.array([1024, 340]) with 0 padding
+
         base_size = np.array([1024, 340])
 
+        h, w = image_padded.shape[:2]
+
+        ch = int(self.pad[1] * h)
+        cw = int(self.pad[0] * w)
+        image = image_padded[ch:h-ch, cw:w-cw, :].copy()
+
         h, w = image.shape[:2]
+
+        image_size = np.array([w, h])
 
         scale = w / base_size[0]
         image_resized = resize_width(image, base_size[0])
@@ -1043,7 +1053,7 @@ class Normalizer:
                 
                 vis = cv2.circle(vis, (int(kp.pt[0]), int(kp.pt[1])), 2, (0, 255, 255), -1)
 
-            cv2.imshow("Pinhole Detections", vis)
+            cv2.imshow("Pinhole Detections clahe", vis)
             # cv2.imshow("Annotated image 2", edges)
             # cv2.waitKey(0)
             # cv2.imshow("Annotated image 2", line_img)
@@ -1052,9 +1062,14 @@ class Normalizer:
 
         for kp in keypoints:
             kp.pt = (kp.pt[0] * scale, kp.pt[1] * scale)
+
+            kp.pt = (
+                (kp.pt[0] + cw),
+                (kp.pt[1] + ch)
+            )
+
+
             kp.size *= scale
-
-
 
         return keypoints
 
