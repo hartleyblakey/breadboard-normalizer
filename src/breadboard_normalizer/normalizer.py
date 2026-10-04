@@ -175,7 +175,7 @@ class PinGrid:
         self._quadtree = QuadTree((low[0], low[1], high[0] + 1, high[1] + 1), capacity=16)
         self._quadtree.insert_many_np(self.points)
 
-        self.pitch = self._size / self._grid_size
+        self.pitch = (self._size * (1 - 2 * self._pad)) / self._grid_size
     
     
     def transform_points_3x3(points, matrix):
@@ -185,6 +185,17 @@ class PinGrid:
         points_transformed = points.reshape(-1, 1, 2)
         points_transformed = cv2.perspectiveTransform(points_transformed, matrix)
         return points_transformed.reshape(original_shape)
+    
+    def nearest_neighbors_index(self, points):
+        neighbors = []
+        for point in points:
+            i, _ = self._quadtree.nearest_neighbor_np((point[0], point[1]))
+            neighbors.append(i)
+        return np.array(neighbors, dtype=int)
+    
+    def nearest_neighbor_index(self, point):
+        i, _ = self._quadtree.nearest_neighbor_np((point[0], point[1]))
+        return i
     
     def nearest_neighbors(self, points):
         target_correspondences = []
